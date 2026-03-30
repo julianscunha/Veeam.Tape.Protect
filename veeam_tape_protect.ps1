@@ -1,88 +1,135 @@
-# ===================================================================
-# Script: Tape Protect Cycle Automation
-# Versão: 2.0 - 01/2026
-# Compatibilidade: Veeam Backup & Replication v12.x ou superior
-#
-# Objetivo:
-#  - Proteger fitas GFS contra gravação
-#  - Remover proteção de fitas expiradas
-#
-# Requer: 
-#  - Fitas com dados no Media Pool
-#  - Permissões de administrador para Veeam PowerShell 7.x
-# ===================================================================
+#requires -Version 7.0
+<#
+.SYNOPSIS
+    Automates tape software protection and unprotection in a Veeam media pool.
 
-# ===================== CONFIGURAÇÕES =====================
+.DESCRIPTION
+    This script protects eligible tapes that match the configured media set
+    pattern and removes software protection from tapes that are already expired.
 
-# Dias mínimos desde a última gravação para proteção
-$daysToProtect = 7
+.PARAMETER DaysToProtect
+    Number of days used to calculate the protection threshold.
 
-# Parte da descrição do Media Set para filtrar (ex: "*Daily*")
-$mediaSetPattern = "*Daily*"
+.PARAMETER MediaSetPattern
+    Pattern used to filter tapes by MediaSet.
 
-# Nome do Media Pool GFS
-$writePoolName = "GFS-Pool"
+.PARAMETER WritePoolName
+    Name of the media pool that will be processed.
 
-# Log
-$log = "C:\temp\tape_protect.log"
+.PARAMETER LogPath
+    Path to the execution log file.
 
-# ===================== INICIALIZAÇÃO =====================
+.EXAMPLE
+    pwsh.exe -File .\veeam_tape_protect.ps1
 
-Get-Date | Out-File $log
-#Import-Module Veeam.Backup.PowerShell
+.EXAMPLE
+    pwsh.exe -File .\veeam_tape_protect.ps1 -DaysToProtect 7 -MediaSetPattern "*Daily*" -WritePoolName "GFS-Pool"
 
-$limitDate = (Get-Date).AddDays(-$daysToProtect)
+.NOTES
+    Version      : 2.0.0
+    Requirements : PowerShell 7+, Veeam Backup & Replication v13 recommended
+#>
 
-Write-Output "===== INÍCIO DO CICLO DE PROTEÇÃO =====" | Out-File $log -Append
+[CmdletBinding()]
+param(
+    [int]$DaysToProtect = 7,
+    [string]$MediaSetPattern = "*Daily*",
+    [string]$WritePoolName = "GFS-Pool",
+    [string]$LogPath = "C:\Temp\tape_protect.log"
+)
 
-# ===================== FASE A – PROTEGER FITAS =================================
+$ErrorActionPreference = "Stop"
 
-$TapesToProtect = Get-VBRTapeMedium -MediaPool $writePoolName | Where-Object {
-    $_.MediaSet -like $mediaSetPattern -and
-    $_.LastWriteTime -ne $null -and
-    $_.LastWriteTime -ge $limitDate -and
-    $_.ProtectedBySoftware -eq $false -and
-	$_.IsLocked -eq $false
+function Initialize-Log {
+    $folder = Split-Path -Path $LogPath -Parent
+    if ($folder -and -not (Test-Path $folder)) {
+        New-Item -Path $folder -ItemType Directory -Force | Out-Null
+    }
+
+    if (Test-Path $LogPath) {
+        Remove-Item -Path $LogPath -Force
+    }
+
+    New-Item -Path $LogPath -ItemType File -Force | Out-Null
 }
 
-if (-not $TapesToProtect) {
-    Write-Output "Nenhuma fita elegível para proteger." | Out-File $log -Append
-} else {
-    foreach ($t in $TapesToProtect) {
-        try {
-			Write-Output "Protegendo fita: $($t.Name)"
-            # Ativa proteção contra gravação
-            Enable-VBRTapeProtection -Medium $t
-            Write-Output "Fita $($t.Name) protegida contra gravação." | Out-File $log -Append
-        }
-        catch {
-            Write-Output "ERRO ao proteger fita $($t.Name): $_" | Out-File $log -Append
+function Write-Log {
+    param(
+        [Parameter(Mandatory)]
+        [string]$Message,
+
+        [ValidateSet("INFO","SUCCESS","WARNING","ERROR")]
+        [string]$Level = "INFO"
+    )
+
+    $line = "{0} [{1}] {2}" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"), $Level, $Message
+    Write-Host $line
+    Add-Content -Path $LogPath -Value $line
+}
+
+try {
+    Initialize-Log
+    Write-Log "===== START PROTECTION CYCLE ====="
+
+    Import-Module Veeam.Backup.PowerShell -ErrorAction Stop
+    Write-Log "Veeam.Backup.PowerShell module loaded." "SUCCESS"
+
+    $limitDate = (Get-Date).AddDays(-$DaysToProtect)
+    Write-Log "Protection threshold date: $limitDate"
+    Write-Log "Media pool: $WritePoolName"
+    Write-Log "Media set pattern: $MediaSetPattern"
+
+    $tapesToProtect = Get-VBRTapeMedium -MediaPool $WritePoolName | Where-Object {
+        $_.MediaSet -like $MediaSetPattern -and
+        $_.LastWriteTime -ne $null -and
+        $_.LastWriteTime -ge $limitDate -and
+        $_.ProtectedBySoftware -eq $false -and
+        $_.IsLocked -eq $false
+    }
+
+    if (-not $tapesToProtect) {
+        Write-Log "No tapes are currently eligible for protection."
+    }
+    else {
+        Write-Log "Tapes eligible for protection: $($tapesToProtect.Count)"
+        foreach ($tape in $tapesToProtect) {
+            try {
+                Enable-VBRTapeProtection -Medium $tape
+                Write-Log "Tape '$($tape.Name)' protected." "SUCCESS"
+            }
+            catch {
+                Write-Log "Failed to protect tape '$($tape.Name)': $($_.Exception.Message)" "ERROR"
+            }
         }
     }
-}
 
-# ===================== FASE B – DESPROTEGER FITAS EXPIRADAS =====================
+    Write-Log "===== CHECKING EXPIRED PROTECTED TAPES ====="
 
-Write-Output "===== CHECANDO FITAS PROTEGIDAS EXPIRADAS =====" | Out-File $log -Append
+    $protectedTapes = Get-VBRTapeMedium -MediaPool $WritePoolName | Where-Object {
+        $_.ProtectedBySoftware -eq $true -and
+        $_.IsExpired -eq $true
+    }
 
-$ProtectedTapes = Get-VBRTapeMedium -MediaPool $writePoolName | Where-Object {
-    $_.ProtectedBySoftware -eq $true -and
-    $_.IsExpired -eq $true
-}
-
-if (-not $ProtectedTapes) {
-    Write-Output "Nenhuma fita protegida expirou." | Out-File $log -Append
-} else {
-    foreach ($p in $ProtectedTapes) {
-        try {
-			Write-Output "Removendo proteção da fita expirada: $($p.Name)"
-            # Desativa proteção
-            Disable-VBRTapeProtection -Medium $p
-            Write-Output "Fita $($p.Name) desprotegida e disponível para escrita." | Out-File $log -Append
-        }
-        catch {
-            Write-Output "ERRO ao desproteger fita $($p.Name): $_" | Out-File $log -Append
+    if (-not $protectedTapes) {
+        Write-Log "No expired protected tapes were found."
+    }
+    else {
+        Write-Log "Expired protected tapes found: $($protectedTapes.Count)"
+        foreach ($tape in $protectedTapes) {
+            try {
+                Disable-VBRTapeProtection -Medium $tape
+                Write-Log "Protection removed from tape '$($tape.Name)'." "SUCCESS"
+            }
+            catch {
+                Write-Log "Failed to remove protection from tape '$($tape.Name)': $($_.Exception.Message)" "ERROR"
+            }
         }
     }
+
+    Write-Log "===== END CYCLE ====="
+    exit 0
 }
-Write-Output "===== FIM DO CICLO =====" | Out-File $log -Append
+catch {
+    Write-Log $_.Exception.Message "ERROR"
+    exit 1
+}
