@@ -30,13 +30,6 @@ The script protects recently-written GFS tapes against accidental overwrite and 
 
 ---
 
-## Files
-
-- `veeam_tape_protect.ps1` — main script (edit configuration at the top)
-- `LICENSE` — project license
-
----
-
 ## Configuration
 
 Open `veeam_tape_protect.ps1` and edit the top section to match your environment:
