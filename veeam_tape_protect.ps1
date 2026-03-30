@@ -1,6 +1,5 @@
 # ===================================================================
 # Script: Tape Protect Cycle Automation
-# Autor: Juliano Cunha - Triple S
 # Versão: 2.0 - 01/2026
 # Compatibilidade: Veeam Backup & Replication v12.x ou superior
 #
